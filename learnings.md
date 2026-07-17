@@ -211,6 +211,100 @@ TF-IDF only sees exact words, so it split the age tweets and left half mixed in 
 
 ---
 
+## KNN note — why "training accuracy" can lie (and how we fix it)
+
+*(This applies to the KNN classifier we build next, not to K-Means above — but it's the
+single most important gotcha to understand, so it lives here.)*
+
+**KNN doesn't really "learn" — it memorizes.** Its whole training step is: keep a copy
+of every training tweet (as an embedding) plus its label. To classify a new tweet, it
+finds the closest stored tweet(s) and copies their label. That's it.
+
+**The trap.** If you measure accuracy *on the training data itself* with **k=1** (look at
+the single nearest neighbor), each tweet's nearest neighbor is **itself** — distance
+zero, a perfect match. So KNN copies its own label and is right every time →
+**~100% "accuracy."**
+
+That number is meaningless. It's like grading an open-book exam where the questions are
+the exact flashcards the student is holding: scoring 100% only proves they can look
+things up, not that they learned anything that transfers to *new* tweets.
+
+**How we fix it — two safeguards:**
+
+1. **Cross-validation when choosing k.** Split the training data into chunks ("folds").
+   Put some folds into KNN's memory and score it on a *different* fold held **out** of
+   memory. Now the tweet being scored isn't in the memory, so it can't find itself — the
+   score is honest. This is also how we discover that a larger k (e.g. 15) generalizes
+   better than k=1.
+
+2. **Report the held-out test set.** The headline accuracy comes from the 20% of tweets
+   the model **never stored**. They're strangers to it, so their accuracy is the real,
+   trustworthy result.
+
+**One-line summary:** k=1 on training data is a *mirror* (it just sees itself);
+cross-validation and the separate test set are the *honest exams*.
+
+---
+
+## Two different "k"s (don't mix them up)
+
+- **6 = number of classes/labels** — the categories we sort tweets into (`religion`,
+  `age`, `gender`, `ethnicity`, `not_cyberbullying`, `other_cyberbullying`). Fixed by the
+  dataset.
+- **k = number of neighbors** in K**N**N — how many nearby training tweets get to *vote*
+  on a prediction. A knob **we** tune.
+
+They're unrelated — you can have 6 classes and k=9 neighbors. Whenever this guide says
+"the value of k", it means the neighbor count, not the class count.
+
+---
+
+## How we pick k (the number of neighbors)
+
+We don't guess k — we let the data choose it, using **cross-validation on the training
+set only**. The test set stays locked away until the very end.
+
+**Step A — split the training data into folds.** Chop the training set into 5 equal
+parts ("folds").
+
+**Step B — for each candidate k (we try k = 1, 2, 3, … 30):**
+
+1. Train on 4 folds, test on the 1 held-out fold → get an accuracy.
+2. Rotate so each fold is the held-out one exactly once → 5 accuracies.
+3. Average them → **one honest score for this k**.
+
+**Step C — plot and pick.** Plot *average CV accuracy vs k* and choose the k with the
+highest score (`best_k`).
+
+```text
+CV accuracy
+  ^
+  |        .-•-.___
+  |     •-'        '-•-•___        <- peak here = best_k
+  |   •'                   '-•-.
+  | •  (k=1: too noisy)          (large k: over-smoothed)
+  +--------------------------------> k
+    1   3   5   ...            30
+```
+
+**Why sweep instead of hard-coding a number?** The best k depends on the data:
+
+- **k too small (like 1):** the prediction rides on a single neighbor → jumpy and
+  noise-sensitive (and on training data it fakes ~100% by matching itself).
+- **k too large:** you average over so many neighbors that the class boundaries blur and
+  the model drifts toward just predicting the biggest class.
+- The sweep finds the sweet spot **empirically**.
+
+**The discipline that keeps it honest:** all k-tuning happens *inside the training data*.
+Only after `best_k` is chosen do we train once on the full training set and report
+accuracy on the untouched **test** set — no peeking, no leakage.
+
+The KNN vote itself, once k is fixed: embed the tweet → find its k nearest training
+tweets (Euclidean distance) → those neighbors' labels vote → the label with the most
+votes among the 6 classes wins.
+
+---
+
 ## Environment notes
 - Everything runs in the project `.venv`.
 - Extra packages installed for these notebooks: `pandas`, `sentence-transformers`
