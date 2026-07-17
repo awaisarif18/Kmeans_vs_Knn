@@ -206,7 +206,7 @@ TF-IDF only sees exact words, so it split the age tweets and left half mixed in 
    natural for BERT.
 3. **Meaning beats word-matching** for messy text: BERT's 89% vs TF-IDF's 77%.
 4. **Unsupervised ≠ using labels.** Labels only ever appear in the evaluation step.
-5. **Dimensionality reduction (PCA/t-SNE) is for the eyes only** — never cluster on the
+5. **Dimensionality reduction (PCA/t-SNE) is for the eyes only**  never cluster on the
    2D projection; cluster on the full matrix.
 
 ---
