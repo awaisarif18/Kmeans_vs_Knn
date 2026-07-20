@@ -477,6 +477,79 @@ Three arguments doing real work:
 `backbone.trainable = False` — **nothing is trained anywhere.** The backbone is a pure feature
 extractor. This keeps the comparison honest: we upgraded the *input*, not the *algorithms*.
 
+### The complete image → vector code (as used in `knn_vs_kmeans_M_resnet.ipynb`)
+
+```python
+import numpy as np
+from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
+from tensorflow.keras.utils import load_img, img_to_array   # Keras 2: keras.preprocessing.image
+
+IMG_SIZE   = 224
+BATCH_SIZE = 32
+
+# --- 1. one image -> one preprocessed (224, 224, 3) array -------------------
+def image_to_tensor(path):
+    img = load_img(path, target_size=(IMG_SIZE, IMG_SIZE))   # RGB, resized
+    return preprocess_input(img_to_array(img))               # BGR + mean-subtracted
+
+# --- 2. many images -> one (n, 2048) matrix, in batches ---------------------
+def embed_stream(candidates, backbone, batch_size=BATCH_SIZE):
+    """Embed in batches, dropping any image that fails to decode.
+
+    Returns (features, kept_paths), guaranteed row-aligned: a path only enters
+    `kept` if its array made it into the batch that was predicted.
+    """
+    feats, kept = [], []
+    for start in range(0, len(candidates), batch_size):
+        arrays, ok = [], []
+        for p in candidates[start:start + batch_size]:
+            try:
+                arrays.append(image_to_tensor(p))
+                ok.append(p)
+            except Exception:
+                continue                       # corrupt JPEG -> skip
+        if not arrays:
+            continue
+        feats.append(backbone.predict(np.stack(arrays), verbose=0))
+        kept.extend(ok)
+    return np.vstack(feats), kept
+
+# --- 3. build the frozen extractor and run it ------------------------------
+backbone = ResNet50(weights='imagenet', include_top=False, pooling='avg')  # -> 2048-D
+backbone.trainable = False
+
+X, paths = embed_stream(list_of_jpg_paths, backbone)
+X = X.astype(np.float32)
+X = X / np.linalg.norm(X, axis=1, keepdims=True)   # L2-normalize -> unit sphere
+# X.shape == (n_images, 2048)  — ready for KMeans / KNN
+```
+
+**Simple explanation, line by line:**
+
+1. **`load_img(..., target_size=(224, 224))`** — open the JPEG and squash it to 224×224 pixels,
+   because that is the size ResNet50 was trained on. Everything downstream needs the same shape.
+2. **`img_to_array`** — turn the picture into a grid of numbers: `(224, 224, 3)`, i.e. height ×
+   width × the 3 colour channels.
+3. **`preprocess_input`** — re-arrange those numbers the exact way ResNet expects (BGR order,
+   ImageNet mean subtracted). **Not** `/255` — see §6; using the wrong one silently degrades
+   every vector.
+4. **`ResNet50(weights='imagenet', include_top=False, pooling='avg')`** — load the pretrained
+   network, **remove its 1000-class guessing head**, and average-pool what's left. What comes out
+   is the network's internal *description* of the image — **2048 numbers** — instead of its guess.
+5. **`backbone.trainable = False`** — freeze it. We're not training anything; it's a fixed
+   "picture → numbers" function.
+6. **`backbone.predict(np.stack(arrays))`** — push a batch of 32 images through in one go and get
+   back a `(32, 2048)` matrix. Batching keeps memory in the tens of MB instead of ~1.2 GB.
+7. **`try / except … continue`** — the dataset contains two zero-byte JPEGs. Skip them, and note
+   that a path is appended to `kept` only *after* its array succeeds, so row *i* of `X` always
+   corresponds to `paths[i]`.
+8. **`X / np.linalg.norm(X, axis=1, keepdims=True)`** — make every row length 1, so comparing two
+   images means comparing *direction* (≈ cosine similarity), not brightness/magnitude.
+
+**The one-sentence version:** resize each image to 224×224, preprocess it the ResNet way, run it
+through a frozen ImageNet ResNet50 with the classifier head cut off, and keep the 2048-number
+summary it produces — then normalise it so distances mean "how similar are these two images."
+
 ---
 
 ## 5. ⚠️ The objection to raise yourself — ImageNet already knows cats and dogs
