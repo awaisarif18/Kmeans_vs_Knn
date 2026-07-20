@@ -1,3 +1,13 @@
+> **This document has two parts:**
+>
+> 1. **Previous learnings** (below) — K-Means & KNN on cyberbullying tweets, TF-IDF vs BERT.
+> 2. **[Today's learnings — 20 July 2026](#todays-learnings--20-july-2026)** — KNN vs K-means and the
+>    **M metric** on Cats vs Dogs: raw pixels vs pretrained ResNet50 embeddings.
+
+---
+
+# Part 1 — Previous learnings
+
 # Clustering Cyberbullying Tweets with K-Means — TF-IDF vs BERT
 
 A step-by-step guide to what we built, in what order, and *why* each step exists.
@@ -311,3 +321,299 @@ votes among the 6 classes wins.
   (brings `torch` + `transformers`), `seaborn`.
 - The BERT model (`all-MiniLM-L6-v2`) downloads once to the Hugging Face cache; after
   that it runs offline.
+
+---
+---
+
+# Today's learnings — 20 July 2026
+
+## The task
+
+> Take the Cats vs Dogs images, split them **two different ways** — once with **K-means**
+> (unsupervised, k=2) and once with **KNN** (supervised, 2 groups) — and measure **how much the
+> two splits disagree** using a metric called **M**. Then do it again with the *only* change being
+> how an image is turned into numbers: **raw pixels** first, then **pretrained ResNet50 embeddings**.
+
+Notebooks produced today:
+
+- `knn_vs_kmeans_M.ipynb` — the **raw-pixel** version (grayscale 64×64 → 4096 features)
+- `knn_vs_kmeans_M_resnet.ipynb` — the **ResNet50 embedding** version (RGB 224×224 → 2048 features)
+
+The design is a **controlled experiment**: K-means, KNN, and the M formula are byte-for-byte
+identical between the two notebooks. Only the feature extractor changes. So any change in M is
+caused by the **representation**, not the algorithms.
+
+---
+
+## 1. The M metric
+
+$$M = \frac{1}{N}\sum_{i=1}^{N}\big(\text{label}^{\text{KMeans}}_i - \text{label}^{\text{KNN}}_i\big)^2$$
+
+The labels are 0/1, so each squared term is **1 when the two methods disagree** on an image and
+**0 when they agree**. The sum is therefore just *the number of disagreeing images*, and dividing
+by N puts M in **[0, 1]**.
+
+**M is the disagreement rate. Agreement = 1 − M.**
+
+| M | Meaning |
+|---|---|
+| 0 | the two partitions are **identical** |
+| 0.20 | they disagree on 20% of images (agreement 0.80) |
+| 1 | they disagree on **every** image |
+
+### The label-flip fix (mandatory)
+
+K-means cluster IDs are **arbitrary** — its "cluster 0" might be the dogs. Counting disagreements
+without fixing that would inflate M for a purely cosmetic reason.
+
+```python
+def align_kmeans_to_knn(reference, clusters):
+    asis = (clusters != reference).sum()
+    flip = ((1 - clusters) != reference).sum()
+    if flip < asis:
+        return (1 - clusters), int(flip), True
+    return clusters, int(asis), False
+```
+
+Try both mappings, keep whichever agrees more. This is the same idea as `cluster_aligned` in
+Part 1 — it shows up every time you compare an unsupervised labelling to anything else.
+
+---
+
+## 2. The results
+
+| Metric | Raw pixels | **ResNet50** |
+|---|---|---|
+| Features | 4,096 (grayscale 64×64) | 2,048 (frozen ResNet50) |
+| **M** | **0.4715** | **0.0450** |
+| Agreement (1 − M) | 0.529 | **0.955** |
+| Disagreeing images | 943 / 2000 | **90 / 2000** |
+| KNN accuracy vs true labels | 0.537 | **0.987** |
+| K-means accuracy vs true labels | — | **0.956** |
+| ARI (flip-proof) | ≈ 0 | **0.828** |
+| NMI (flip-proof) | ≈ 0 | **0.778** |
+| Flip applied | no | no |
+
+**M fell by 90%** — same algorithms, same data, same metric.
+
+*(The raw-pixel ARI/NMI are recalled from that run, not re-verified — recompute before quoting.)*
+
+### Three findings
+
+**(a) The unsupervised method nearly recovered the true classes on its own.** K-means scored
+**0.956** against the real cat/dog labels *without ever seeing a label*. On raw pixels this was
+impossible — it grouped by brightness and background instead. The "closest to centroid" figure
+shows it plainly: cluster 0's 8 most typical members are **8 cats**, cluster 1's are **8 dogs**.
+
+**(b) The 90 disagreements are structural, not noise.** The contingency table is completely
+one-sided:
+
+|  | KNN group 0 | KNN group 1 |
+|---|---|---|
+| **K-means cluster 0** | 912 | **0** |
+| **K-means cluster 1** | 90 | 998 |
+
+That **zero** is the interesting part. K-means cluster 0 is a **pure subset** of the cats — it never
+once claims a dog. K-means errs in one direction only: it sweeps 90 cats into its dog cluster. The
+agreement map confirms it geometrically — the red (disagree) points form a tight vertical band right
+at the PC1 boundary between the two lobes. These are genuinely ambiguous images, not random failures.
+
+**(c) Two independent, flip-proof metrics agree.** ARI 0.828 and NMI 0.778 don't care what the
+labels are *called*, so the alignment step can't fool them. They tell the same story as M, which
+means M isn't an artefact of how we aligned.
+
+---
+
+## 3. ⚠️ The most important lesson: M is only interpretable if KNN is accurate
+
+The headline reading of M is *"how well does K-means recover the true classes on its own?"*
+**That reading is only valid if KNN actually tracks the true classes.**
+
+M compares K-means to **KNN**, not to the truth. KNN is a *stand-in* for the truth — and a stand-in
+is only as good as its accuracy.
+
+- **Raw-pixel run: KNN scored 0.537 — barely above a coin flip (0.50).** So M = 0.47 there was
+  **not** measuring "K-means failed to find cats and dogs." It was measuring the disagreement
+  between **two near-arbitrary partitions**. The number was real; the interpretation was not.
+  *(The first notebook's write-up made exactly that claim, and we corrected it.)*
+- **ResNet run: KNN scored 0.987.** Now the licence holds and M can be read the intended way.
+
+> **Rule: never report M alone. Always report M next to KNN accuracy**, because KNN accuracy is
+> what tells you whether M means anything at all.
+
+That is why the final chart puts the two panels side by side, with a dashed "coin flip" line at
+0.50 on the accuracy panel.
+
+---
+
+## 4. The one change that mattered — pixels vs embeddings
+
+### Raw pixels (notebook 1)
+```python
+img = Image.open(path).convert('L').resize((64, 64))   # grayscale
+X_row = np.asarray(img).flatten() / 255.0              # 4096 numbers
+```
+Each feature is **one pixel's brightness**. Distance between two images = "do these two pictures
+have similar light and dark in the same places?" That is a question about *photography*, not about
+*animals*. Which is why K-means clustered by background and exposure.
+
+### ResNet50 embeddings (notebook 2)
+```python
+backbone = ResNet50(weights='imagenet', include_top=False, pooling='avg')  # -> 2048-D
+X = backbone.predict(batch)
+X = X / np.linalg.norm(X, axis=1, keepdims=True)       # L2-normalize
+```
+Each feature is a **learned visual concept** (fur texture, ear shape, snout). Distance now means
+"do these two images contain similar *things*?"
+
+Three arguments doing real work:
+
+- `weights='imagenet'` — load the pretrained weights. `None` would give a random, useless network.
+- `include_top=False` — **chop off the 1000-class classifier.** We don't want ResNet's *guesses*,
+  we want the internal representation it built *before* guessing.
+- `pooling='avg'` — without the top, output is a `7×7×2048` feature *map*; averaging over the 7×7
+  grid flattens it to one `2048` vector per image.
+
+`backbone.trainable = False` — **nothing is trained anywhere.** The backbone is a pure feature
+extractor. This keeps the comparison honest: we upgraded the *input*, not the *algorithms*.
+
+---
+
+## 5. ⚠️ The objection to raise yourself — ImageNet already knows cats and dogs
+
+**ResNet50 was pretrained on ImageNet, which contains ~120 dog breeds and several cat classes.**
+So the embedding space was *built* with supervised knowledge of exactly the distinction we're testing.
+
+Presenting "unsupervised K-means recovers cats vs dogs at 95.6%" without this caveat looks like a
+missed flaw. The honest framing:
+
+> The K-means step is unsupervised **given the features**, but the features themselves carry
+> supervision transferred from ImageNet. What we showed is not *"clustering can discover species
+> from nothing."* It is: **once a representation encodes semantic structure, unsupervised similarity
+> becomes nearly equivalent to semantic similarity — which on raw pixels it emphatically is not.**
+
+Still a real result (it's the whole rationale for transfer learning), but state it precisely.
+**Next step to close the gap:** rerun with a *self-supervised* backbone (SimCLR, DINO, MAE) that
+never saw a class label. If M stays low, the claim gets much stronger.
+
+---
+
+## 6. Technical lessons worth keeping
+
+### `preprocess_input`, never `/255`
+ResNet50 expects **BGR** channel order with the ImageNet mean subtracted — not 0–1 floats, not
+0–255. Using `/255` **doesn't crash**; it just silently degrades every embedding. Always import the
+`preprocess_input` that ships with your specific backbone.
+
+### L2-normalise, and then *don't* standardise
+```python
+X = X / np.linalg.norm(X, axis=1, keepdims=True)
+```
+`axis=1` computes each **row's** length; `keepdims=True` keeps the shape `(N, 1)` so the division
+broadcasts row-wise. Every vector ends up length 1, on a unit sphere — only *direction* survives,
+magnitude is discarded.
+
+**This is why no `StandardScaler` is used.** On the unit sphere, Euclidean distance is a monotone
+function of cosine similarity — the geometry these features are meant to be compared in.
+Standardising per-dimension afterwards would destroy the unit norm and amplify low-variance noise
+directions. *(Same reason `normalize_embeddings=True` was right for BERT in Part 1.)*
+
+### `cross_val_predict`, not `fit` + `predict`
+```python
+knn_labels = cross_val_predict(KNeighborsClassifier(n_neighbors=5), X, y, cv=5)
+```
+If KNN predicts data it was fitted on, **every image finds itself as its own nearest neighbour** —
+distance zero, guaranteed correct. This is the *exact same trap* documented in Part 1's "why
+training accuracy can lie". `cross_val_predict` gives every point a label from a model trained on
+the **other** folds, so the self-match is impossible and the accuracy is honest.
+
+### PCA is for the eyes only
+The 2-D projection explains just **15.4%** of the variance. All clustering and classification run on
+the full **2,048** dimensions. Say this before anyone asks why the scatter plots look imperfect.
+*(Same rule as Part 1: never cluster on the 2-D projection.)*
+
+### Stream batches — don't stack the whole dataset
+The original plan did `np.stack([image_to_tensor(p) for p in paths])`, which allocates
+`2000 × 224 × 224 × 3 × 4 bytes ≈ 1.2 GB` **before the first prediction runs**, and decoded every
+JPEG twice. Rewritten to embed 32 at a time: peak memory drops to tens of MB, each file is decoded
+once, and the result is identical.
+
+The batching loop also guarantees **row alignment** — a path is only recorded *after* its image
+decoded successfully:
+```python
+try:
+    arrays.append(image_to_tensor(p))   # if this throws...
+    ok.append(p)                        # ...this never runs -> stays aligned
+except Exception:
+    continue                            # corrupt JPEG, skip
+```
+This matters because a 2048-D embedding **cannot be reshaped back into a picture** — to show
+"what's in this cluster" you must load the original file from a path that still matches row *i*.
+(The dataset has two zero-byte files: `Cat/666.jpg` and `Dog/11702.jpg`.)
+
+### ⚠️ The cache trap
+```python
+if Path(EMB_CACHE).exists():   # only asks "does the file exist?"
+```
+It does **not** ask "was this built with the current settings." Change `N_PER_CLASS` from 1000 to
+12500, hit run, and it happily loads the **old 2,000-row file** — no error, no warning, wrong data.
+
+**Fix: put the settings in the filename**, so each config gets its own cache automatically:
+```python
+EMB_CACHE = f'resnet_embeddings_{N_PER_CLASS}_{IMG_SIZE}.npz'
+```
+
+### Sorting filenames is alphabetical, not numeric
+`sorted()` gives `1.jpg, 10.jpg, 100.jpg, 1000.jpg, 10000.jpg…` — **not** 1, 2, 3. Taking "the first
+1000" gives a scattered sample, not images 1–1000. Harmless here (still an arbitrary sample) but
+worth knowing before it confuses you.
+
+---
+
+## 7. Debugging lessons from today
+
+1. **A notebook that "doesn't work" is often one broken line.** The first notebook failed entirely
+   because an f-string had been split mid-word across two source lines
+   (`f'Dog fold` / `er not found...'`) → `SyntaxError`. Since that cell defined `X`, `y`, and `N`,
+   *every* downstream cell died with cascading `NameError`s. **Read the first error, not the last.**
+2. **Always render a figure and look at it.** A validator checks colour, not layout. Two defects
+   were invisible in code and obvious on sight:
+   - the two red "disagree" ribbons cross at dead centre, so their labels landed on the **identical
+     point** — one number completely hidden under the other. Fixed by placing them at t=0.24 and
+     t=0.76 along the curve instead of both at t=0.5.
+   - when a flow count is **0**, the ribbon has zero width but the label still drew — a stray
+     "0 / 0.0%" floating with nothing under it. Fixed by skipping zero-count flows.
+3. **Don't let a download progress bar into a saved notebook.** The ImageNet weights download wrote
+   ~200 KB of ANSI progress-bar junk into the stored cell output. Re-running once the weights and
+   embeddings were cached produced a clean file.
+4. **Never `Read` an executed notebook directly** — after execution it's 1–2.5 MB of base64 PNGs.
+   Use `nbformat` in a script to inspect sources and text outputs, and extract images to disk to
+   view them.
+
+---
+
+## 8. Takeaways
+
+1. **The representation is the whole game.** Identical K-means, identical KNN, identical metric —
+   M went from 0.47 to 0.045 purely by changing how an image becomes numbers. This is the **same
+   lesson as Part 1** (TF-IDF 77% → BERT 89%), now demonstrated on images with a controlled
+   before/after.
+2. **A metric can be computed correctly and still be uninterpretable.** M was always "right"; at
+   KNN = 0.537 it just didn't mean what we wanted it to mean. **Always check the assumption a
+   metric rests on before reading it.**
+3. **Unsupervised ≠ label-free.** K-means used no labels — but its *features* were built on
+   ImageNet labels. Be precise about where supervision entered.
+4. **Look at your errors, not just their count.** "90 disagreements" is a number; "all 90 in one
+   cell, sitting on the decision boundary, K-means never mislabels a dog as a cat" is a *finding*.
+5. **Guard against silent wrongness** — self-neighbour leakage, stale caches, `/255` instead of
+   `preprocess_input`. None of these throw an error. They just quietly give you the wrong answer.
+
+---
+
+## Environment notes (today)
+- `tensorflow` **2.21.0** installed into the project `.venv` (alongside the existing `torch`).
+- **TensorFlow has no GPU support on native Windows for ≥ 2.11** — CPU only. Use WSL2 for GPU.
+- ResNet50 ImageNet weights (~100 MB) download once to `~/.keras`, then run offline.
+- `resnet_embeddings.npz` ≈ 16 MB for 2,000 images (≈ 205 MB if scaled to the full ~25,000).
+- Notebooks are built programmatically with `nbformat` and executed with
+  `nbconvert --execute --inplace`.
